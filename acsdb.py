@@ -1,6 +1,17 @@
 # -*- coding: utf-8 -*-
 
-'''
+"""
+Usage:
+    acsdb.py <year>
+
+Options:
+    [year]  : year in YYYY format representing the ACS year to be loaded. The year of 
+              should match the directory storing all of the raw data to be added to the
+              database
+Example:
+    $ python acsdb.py 2016
+    
+
 README
 Setup:
     1. Create directories to store all ACS information for time period
@@ -31,124 +42,29 @@ Run:
         3. build_geoheader()
         4. load_geoheader()
         5. build_acs_tables()
-'''
+"""
 
 import csv
 import os
 import psycopg2 as psql
+from caeser import utils
 import zipfile
 import xlrd
 import collections
 import re
 import codecs
 import chardet
-
-#
-#******************************Run time variables*****************************
-#subdirectory containing downloaded zip files
-yr = '2015'
-#root directory storing all of the census information
-os.chdir('/home/nate/sharedworkspace/Data/Census/ACS/acs5yr_{}'.format(yr))
-data = 'data'
-#db schema name
-
-
-#Excel spreadsheet containing Census table names, sequence, and index positions
-#for each table within each sequence file
-wb = xlrd.open_workbook('ACS_{}_SF_5YR_Appendices.xls'.format(yr))
-ws = wb.sheet_by_name('Appendix A')
-
-psql_schema = 'acs5yr_{}'.format(yr)
-db = psql.connect(database='census', user='postgres', 
-    host='caeser-geo.memphis.edu')
-db.set_client_encoding('UNICODE')
-cursor = db.cursor()
-
-cursor.execute("create schema if not exists {0}".format(psql_schema))
-cursor.execute("set session search_path to {0}".format(psql_schema))
-db.commit()
-
-"""
-builds geoheader file using predefined list of column names pulled from
-ACS Summary File Technical Documentation.
-geoheader[0] -> field name
-geoheader[1] -> field description
-geoheader[2] -> starting index in fixed-width text file, not used but left in 
-                in case of future need
-geoheader[3] -> ending index in fixed-width text file, not used but left in 
-                in case of future need
-"""
-
-geoheader = [['fileid', 'Always equal to ACS Summary File identification', 0, 6],
-            ['stusab', 'State Postal Abbreviation', 6, 8],
-            ['sumlevel', 'Summary Level', 8, 11],
-            ['component', 'Geographic Component', 11, 13],
-            ['logrecno', 'Logical Record Number', 13, 20],
-            ['us', 'US', 20, 21],
-            ['region', 'Census Region', 21, 22],
-            ['division', 'Census Division', 22, 23],
-            ['statece', 'State (Census Code)', 23, 25],
-            ['state', 'State (FIPS Code)', 25, 27],
-            ['county', 'County of current residence', 27, 30],
-            ['cousub', 'County Subdivision (FIPS)', 30, 35],
-            ['place', 'Place (FIPS Code)', 35, 40],
-            ['tract', 'Census Tract', 40, 46],
-            ['blkgrp', 'Block Group', 46, 47],
-            ['concit', 'Consolidated City', 47, 52],
-            ['aianhh', ('American Indian Area/Alaska Native Area/ Hawaiian '
-                'Home Land (Census)'), 52, 56],
-            ['aianhhfp', ('American Indian Area/Alaska Native Area/ Hawaiian '
-                'Home Land (FIPS)'), 56, 61],
-            ['aihhtli', ('American Indian Trust Land/ Hawaiian Home Land '
-                'Indicator'), 61, 62],
-            ['aitsce', 'American Indian Tribal Subdivision (Census)', 62, 65],
-            ['aits', ('American Indian Tribal Subdivision (Census) Subdivision '
-                '(FIPS)'), 65, 70],
-            ['anrc', 'Alaska Native Regional Corporation (FIPS)', 70, 75],
-            ['cbsa', 'Metropolitan and Micropolitan Statistical Area', 75, 80],
-            ['csa', 'Combined Statistical Area', 80, 83],
-            ['metdiv', 'Metropolitan Statistical Area-Metropolitan Division',
-                 83, 88],
-            ['macc', 'Metropolitan Area Central City', 88, 89],
-            ['memi', 'Metropolitan/Micropolitan Indicator Flag', 89, 90],
-            ['necta', 'New England City and Town Area', 90, 95],
-            ['cnecta', 'New England City and Town Combined Statistical Area', 
-                95, 98],
-            ['nectadiv', 'New England City and Town Area Division', 98, 103],
-            ['ua', 'Urban Area', 103, 108],
-            ['blank1', '', 108, 113],
-            ['cdcurr', 'Current Congressional District', 113, 115],
-            ['sldu', 'State Legislative District Upper', 115, 118],
-            ['sldl', 'State Legislative District Lower', 118, 121],
-            ['blank2', '', 121, 127],
-            ['blank3', '', 127, 130],
-            ['zcta5', '5-digit ZIP Code Tabulation Area', 130, 135],
-            ['submcd', 'Subminor Civil Division (FIPS)', 135, 140],
-            ['sdelm', 'State-School District (Elementary)', 140, 145],
-            ['sdsec', 'State-School District (Secondary)', 145, 150],
-            ['sduni', 'State-School District (Unified)', 150, 155],
-            ['ur', 'Urban/Rural', 155, 156],
-            ['pci', 'Principal City Indicator', 156, 157],
-            ['blank4', '', 157, 163],
-            ['blank5', '', 163, 168],
-            ['puma5', 'Public Use Microdata Area, 5% File', 168, 173],
-            ['blank6', '', 173, 178],
-            ['geoid', 'Geographic Identifier', 178, 218],
-            ['name', 'Area Name', 218, 1218],
-            ['bttr', 'Tribal Tract', 1218, 1224],
-            ['btbg', 'Tribal Block Group', 1224, 1225],
-            ['blank7', '', 1225, 1269]]
-    
+from docopt import docopt
+from config import cnx_params
 
 
 def build_geoheader():
     create_geoheader = ("CREATE TABLE IF NOT EXISTS geoheader "
                         "({0}, CONSTRAINT geoheader_pkey PRIMARY KEY (geoid))")
     create_comment = """COMMENT ON COLUMN "geoheader".{0} is '{1}'"""
-    """
-    if clauses check year of data in order to accommodate changes in 
-    which increased length of geoheader from 200 to 1000 and added new fields
-    """
+    
+    #if clauses check year of data in order to accommodate changes in 
+    #which increased length of geoheader from 200 to 1000 and added new fields   
     if int(yr) < 2011:
         cursor.execute(create_geoheader.format(', '.join(table[0].lower() + 
                                         ' text' for table in geoheader[:-3])))
@@ -197,8 +113,8 @@ def load_geoheader(file_type):
     #list used to hold processed geoheaders to avoid duplication 
     #since it exists in both state zip files
     geoheader_list = []
-    for acs_zip in os.listdir(data):        
-        zip_file = zipfile.ZipFile(os.path.join(data,acs_zip))
+    for acs_zip in [f for f in os.listdir(".") if f.endswith("zip")]:        
+        zip_file = zipfile.ZipFile(acs_zip)
         #uses csv geoheader published starting in 2011
         if file_type == 'csv':
             geo_file = [f for f in zip_file.namelist() if f.endswith('.csv')][0]
@@ -260,8 +176,8 @@ def load_temp_tables():
                     start_index, finish_index))
             i += 1
     #iterate over each state zip file and split sequence files into temporary tables
-    for acs_zip in os.listdir(data):           
-        zip_file = zipfile.ZipFile(os.path.join(data,acs_zip))
+    for acs_zip in [f for f in os.listdir(".") if f.endswith("zip")]:           
+        zip_file = zipfile.ZipFile(acs_zip)
         #build prefix for sequence text file from first item in each list
         sequence_prefix = zip_file.namelist()[0][1:-11]
         tbl_no = 1
@@ -387,7 +303,11 @@ def table_schema(i):
                 row += 1
     return schema    
 
-if __name__ == '__main__':
+def main():
+    print("\nbuilding temp tables\n")
+    build_temp_tables()
+    print("\nloading temp tables\n")
+    load_temp_tables()
     print('\nbuilding geoheader\n')
     build_geoheader()
     print('\nloading geoheader complete\n')
@@ -397,3 +317,102 @@ if __name__ == '__main__':
     print('\nbuilding acs_tables complete\n')
     
     
+
+if __name__ == '__main__':
+    args = docopt(__doc__)
+
+    #
+    #******************************Run time variables*****************************
+    #subdirectory containing downloaded zip files
+    yr = args["<year>"]#'2015'
+    #root directory storing all of the census information
+    os.chdir(os.path.join(os.environ["HOME"],
+                            "sharedworkspace/Data/Census/ACS/acs5yr_{}".format(yr)))
+
+    #Excel spreadsheet containing Census table names, sequence, and index positions
+    #for each table within each sequence file
+    wb = xlrd.open_workbook('ACS_{}_SF_5YR_Appendices.xls'.format(yr))
+    ws = wb.sheet_by_name('Appendix A')
+
+    psql_schema = 'acs5yr_{}'.format(yr)
+    db = psql.connect(database='census', user='postgres', 
+        host='caeser-geo.memphis.edu')
+    db.set_client_encoding('UNICODE')
+    cursor = db.cursor()
+
+    cursor.execute("create schema if not exists {0}".format(psql_schema))
+    cursor.execute("set session search_path to {0}".format(psql_schema))
+    db.commit()
+
+    
+    #builds geoheader file using predefined list of column names pulled from
+    #ACS Summary File Technical Documentation.
+    #geoheader[0] -> field name
+    #geoheader[1] -> field description
+    #geoheader[2] -> starting index in fixed-width text file, not used but left in 
+    #                in case of future need
+    #geoheader[3] -> ending index in fixed-width text file, not used but left in 
+    #                in case of future need  
+    geoheader = [['fileid', 'Always equal to ACS Summary File identification', 0, 6],
+                ['stusab', 'State Postal Abbreviation', 6, 8],
+                ['sumlevel', 'Summary Level', 8, 11],
+                ['component', 'Geographic Component', 11, 13],
+                ['logrecno', 'Logical Record Number', 13, 20],
+                ['us', 'US', 20, 21],
+                ['region', 'Census Region', 21, 22],
+                ['division', 'Census Division', 22, 23],
+                ['statece', 'State (Census Code)', 23, 25],
+                ['state', 'State (FIPS Code)', 25, 27],
+                ['county', 'County of current residence', 27, 30],
+                ['cousub', 'County Subdivision (FIPS)', 30, 35],
+                ['place', 'Place (FIPS Code)', 35, 40],
+                ['tract', 'Census Tract', 40, 46],
+                ['blkgrp', 'Block Group', 46, 47],
+                ['concit', 'Consolidated City', 47, 52],
+                ['aianhh', ('American Indian Area/Alaska Native Area/ Hawaiian '
+                    'Home Land (Census)'), 52, 56],
+                ['aianhhfp', ('American Indian Area/Alaska Native Area/ Hawaiian '
+                    'Home Land (FIPS)'), 56, 61],
+                ['aihhtli', ('American Indian Trust Land/ Hawaiian Home Land '
+                    'Indicator'), 61, 62],
+                ['aitsce', 'American Indian Tribal Subdivision (Census)', 62, 65],
+                ['aits', ('American Indian Tribal Subdivision (Census) Subdivision '
+                    '(FIPS)'), 65, 70],
+                ['anrc', 'Alaska Native Regional Corporation (FIPS)', 70, 75],
+                ['cbsa', 'Metropolitan and Micropolitan Statistical Area', 75, 80],
+                ['csa', 'Combined Statistical Area', 80, 83],
+                ['metdiv', 'Metropolitan Statistical Area-Metropolitan Division',
+                     83, 88],
+                ['macc', 'Metropolitan Area Central City', 88, 89],
+                ['memi', 'Metropolitan/Micropolitan Indicator Flag', 89, 90],
+                ['necta', 'New England City and Town Area', 90, 95],
+                ['cnecta', 'New England City and Town Combined Statistical Area', 
+                    95, 98],
+                ['nectadiv', 'New England City and Town Area Division', 98, 103],
+                ['ua', 'Urban Area', 103, 108],
+                ['blank1', '', 108, 113],
+                ['cdcurr', 'Current Congressional District', 113, 115],
+                ['sldu', 'State Legislative District Upper', 115, 118],
+                ['sldl', 'State Legislative District Lower', 118, 121],
+                ['blank2', '', 121, 127],
+                ['blank3', '', 127, 130],
+                ['zcta5', '5-digit ZIP Code Tabulation Area', 130, 135],
+                ['submcd', 'Subminor Civil Division (FIPS)', 135, 140],
+                ['sdelm', 'State-School District (Elementary)', 140, 145],
+                ['sdsec', 'State-School District (Secondary)', 145, 150],
+                ['sduni', 'State-School District (Unified)', 150, 155],
+                ['ur', 'Urban/Rural', 155, 156],
+                ['pci', 'Principal City Indicator', 156, 157],
+                ['blank4', '', 157, 163],
+                ['blank5', '', 163, 168],
+                ['puma5', 'Public Use Microdata Area, 5% File', 168, 173],
+                ['blank6', '', 173, 178],
+                ['geoid', 'Geographic Identifier', 178, 218],
+                ['name', 'Area Name', 218, 1218],
+                ['bttr', 'Tribal Tract', 1218, 1224],
+                ['btbg', 'Tribal Block Group', 1224, 1225],
+                ['blank7', '', 1225, 1269]]
+    main()
+        
+
+
